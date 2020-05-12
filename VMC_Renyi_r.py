@@ -183,7 +183,7 @@ def main():
 
     random.seed(time.time())
 
-    for i_rep in range(8,Nrep):
+    for i_rep in range(Nrep):
         print('rep ', i_rep)
         t_timer=time.time()
         
