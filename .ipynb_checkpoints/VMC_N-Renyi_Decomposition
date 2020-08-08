@@ -1,0 +1,494 @@
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+import scipy as sp
+import time
+
+def initialize_wf(N,N_pt):
+    coords=np.sort(random.sample(range(N),N_pt))
+    n_occ=np.zeros((N,))        
+    n_occ[coords]=np.ones((N_pt,))        
+    n_pos = np.zeros((N,),dtype=int)        
+    n_pos[coords] = np.arange(1,N_pt+1)
+    
+    return n_occ, n_pos, coords
+
+def WF_MAT(wf_gen, config):
+    n_e = len(config)
+    wf = np.zeros((n_e,n_e),dtype = "complex")
+    wf = np.transpose(wf_gen[config,:])
+     
+    return wf
+    
+def wf_SSH_gen(N,N_pt,BC,t1,t2):
+    h1=np.ones(N-1)
+    h1[0::2]=0
+    h2=np.ones(N-1)
+    h2[1::2]=0
+    hop= np.diag(t1*h1+t2*h2+0j,1)
+    hop[N-1,0]= t1*BC
+    H_t= -(hop+ np.matrix(hop).H)/2 
+    energies, evecs= np.linalg.eigh(H_t)
+    return evecs[:,:N_pt]
+
+def exact_renyi_calc(r,GA,epsilon=1e-9):
+    chi0, _ =np.linalg.eigh(GA)
+    chi1=chi0[np.nonzero(np.abs(chi0)>epsilon)]
+    chi2=chi1[np.nonzero(np.abs(chi1-1)>epsilon)] #/np.sum(chi1[np.nonzero(np.abs(chi1-1)>epsilon)])
+    return np.sum(np.log((1-chi2)**r+chi2**r))/(1-r) #np.sum(np.log((1-chi2)**r+chi2**r))/(1-r) #Twice as large....
+    #return np.log(np.sum(chi2**r))/(1-r) 
+   
+   #############################COUNT OF EQUAL NUMBER CONFIGURATIONS###########################
+    
+def VMC_equal_number(numconfig,check_step,N,N_pt,wf_gen,wf_r,n_occ_r,coords_r,inds_A):
+
+
+    move_attempted = 0
+    move_accepted = 0
+    
+    r = wf_r.shape[2]
+    
+    wf_inv_r = np.zeros(wf_r.shape,dtype=np.complex128)
+    for i_r in range(r):
+        wf_inv_r[:,:,i_r]=np.linalg.inv(wf_r[:,:,i_r])
+        
+    count=0 # counter for energy
+    min_state=5
+    ratio_0=1.0+0.0j
+    
+    Na = np.zeros((1,r))
+    
+    fraction=np.zeros(np.max(inds_A)+2) #a count for each potential particle number in the region 
+    
+    # possible steps
+    step_abs=np.arange(1,Ns+1) #Ns?
+    step_vals=np.sort(np.concatenate((-step_abs,step_abs),axis=0)).tolist()
+
+    for state in range(numconfig+min_state):
+        for step in range(0,check_step):               #Samples observables after check_step iterations
+        
+            for i_r in range(r):
+                for moved_elec in range(N_pt):
+                    move_attempted=move_attempted+1
+
+                    # random walk of Ns steps left or right
+                    stepx=random.sample(step_vals,1)[0]
+                    ptcls_x= np.mod( coords_r[moved_elec,i_r]+stepx, N) # new configuration
+
+                    if n_occ_r[ptcls_x,i_r]==1:
+                        continue
+
+                    u_0 = np.transpose(wf_gen[ptcls_x,:] - wf_gen[coords_r[moved_elec,i_r],:])
+                    #pt_wf_1=np.transpose(wf_gen[ptcls_x,:])
+
+                    rel =  np.dot(wf_gen[ptcls_x,:],wf_inv_r[moved_elec,:,i_r].reshape((N_pt,1)))
+                    #rel=np.dot(inv_wf[moved_elec,:],pt_wf_1)
+
+                    alpha=min(1, np.abs(rel)**2)
+
+                    random_num=random.random()
+
+                    if random_num <= alpha:
+                        move_accepted += 1
+
+                        #Sherman-Morisson Formula for updating inverse matrix
+                        v=np.zeros((N_pt,1))
+                        v[moved_elec]=1
+                        num = np.dot(np.dot(np.dot(wf_inv_r[:,:,i_r],u_0),v.T),wf_inv_r[:,:,i_r])
+                        denom = (1+np.dot(v.T,np.dot(wf_inv_r[:,:,i_r],u_0)))
+                        wf_inv_r[:,:,i_r] = wf_inv_r[:,:,i_r] - num/denom 
+                        wf_r[:,moved_elec,i_r] = np.reshape(np.transpose(wf_gen[ptcls_x,:]),(N_pt,))
+
+                        delta = np.zeros(N)
+                        delta[coords_r[moved_elec,i_r]] = -1
+                        delta[ptcls_x]=1
+
+                        n_occ_r[:,i_r] = n_occ_r[:,i_r] + delta
+                        n_pos_r[:,i_r] = n_pos_r[:,i_r] + (moved_elec + 1)*delta
+                        coords_r[moved_elec,i_r] = ptcls_x 
+                        
+                x=np.argwhere(n_occ_r[:,i_r]>0)
+                assert len(x)== N_pt, 'no of ptcle is %d' % (len(x))
+
+        if state> (min_state-1):
+            pt_num_inside= np.sum(n_occ_r[inds_A,:],axis=0)
+            
+            if np.max(pt_num_inside)==np.min(pt_num_inside) :
+                fraction[np.max(pt_num_inside)] += 1
+                
+                
+        if (state%500) ==0:
+            for i_r in range(r):
+                wf_inv_r[:,:,i_r]=np.linalg.inv(wf_r[:,:,i_r])
+
+    acc_ratio=move_accepted/move_attempted
+    fraction = fraction/(numconfig)        
+    
+    #print("fraction acceptance rate=", acc_ratio)
+    return fraction
+    
+    ############################ AMPLITUDE CALCULATION #####################################
+    
+    def VMC_amplitude_ratio(numconfig,check_step,N,N_pt,wf_gen,wf_r,n_occ_r,n_pos_r,coords_r,inds_A,N_pt_A):
+
+    move_attempted = 0
+    move_accepted = 0
+    
+    r = wf_r.shape[2]
+    
+    wf_inv_r = np.zeros(wf_r.shape,dtype=np.complex128)
+    #number_pt_inside_A= np.sum(n_occ_r[inds_A,0],axis=0)
+    wf_inds= np.zeros((N_pt_A,r),dtype=int)
+    for i_r in range(r):
+        wf_inv_r[:,:,i_r]=np.linalg.inv(wf_r[:,:,i_r])
+        pt_num_inside = np.argwhere( n_occ_r[inds_A,i_r]>0 )
+        pt_num_inside = np.reshape( pt_num_inside, (N_pt_A,)).tolist()
+        wf_inds[:,i_r]=( n_pos_r[ inds_A[pt_num_inside], i_r] )-1   #Used to be sorted
+    
+    wf_swap = np.zeros(wf_r.shape,dtype=np.complex128)
+    up_one = (np.arange(r)+1)%r
+    for i_r in range(r):
+    # r permutation of subsystem indices
+        wf_swap[:,:,i_r] = np.copy(wf_r[:,:,i_r])
+        wf_swap[:,wf_inds[:,i_r],i_r] = np.copy(wf_r[:,wf_inds[:,up_one[i_r]],up_one[i_r]]) #Shifting configurations with the next wf in sequence
+
+    inside_A = 0
+    step_abs=np.arange(1,Ns+1) #Ns?
+    step_vals=np.sort(np.concatenate((-step_abs,step_abs),axis=0)).tolist()
+        
+    count=0 # counter for entropy
+    min_state=5
+    
+    ent_ratio=np.zeros(int(numconfig),dtype=np.float64) 
+    
+    for state in range(numconfig+min_state):
+        for step in range(0,check_step):               #Samples observables after check_step iterations
+        
+            for i_r in range(r):
+                for moved_elec in range(N_pt):
+                    move_attempted=move_attempted+1
+                    
+                    stepx=random.sample(step_vals,1)[0]
+                    ptcls_x= np.mod( coords_r[moved_elec,i_r]+stepx, N) # new configuration
+
+                    if n_occ_r[ptcls_x,i_r]==1:
+                        continue
+
+                    val_orig = np.min( np.abs(inds_A- coords_r[moved_elec,i_r]) )
+                    val_dest = np.min( np.abs(inds_A-ptcls_x) )
+                    if val_orig==0 and val_dest==0 :
+                        inside_A=1
+                        val_1 = np.min(np.abs(wf_inds[:,i_r]-moved_elec))
+                        ind_1 = np.argmin(np.abs(wf_inds[:,i_r]-moved_elec))
+                        assert val_1==0 , 'wrong inds_A for wf'
+                    elif val_orig!=0 and val_dest!=0 :
+                        inside_A=0
+                    else:
+                        continue
+
+                    u_0 = np.transpose(wf_gen[ptcls_x,:] - wf_gen[coords_r[moved_elec,i_r],:])
+                    #pt_wf_1=np.transpose(wf_gen[ptcls_x,:])
+
+                    rel =  np.dot(wf_gen[ptcls_x,:],wf_inv_r[moved_elec,:,i_r].reshape((N_pt,1)))
+                    #rel=np.dot(inv_wf[moved_elec,:],pt_wf_1)
+
+                    alpha=min(1, np.abs(rel)**2)
+
+                    random_num=random.random()
+
+                    if random_num <= alpha:
+                        move_accepted += 1
+
+                        #Sherman-Morisson Formula for updating inverse matrix
+                        v=np.zeros((N_pt,1))
+                        v[moved_elec]=1
+                        num = np.dot(np.dot(np.dot(wf_inv_r[:,:,i_r],u_0),v.T),wf_inv_r[:,:,i_r])
+                        denom = (1+np.dot(v.T,np.dot(wf_inv_r[:,:,i_r],u_0)))
+                        wf_inv_r[:,:,i_r] = wf_inv_r[:,:,i_r] - num/denom 
+                        wf_r[:,moved_elec,i_r] = np.reshape(np.transpose(wf_gen[ptcls_x,:]),(N_pt,))
+                        
+                        if inside_A==1:
+                            wf_swap[:,wf_inds[ind_1,up_one[i_r]],up_one[i_r]]= wf_gen[ptcls_x,:] #CHECK!
+                            inside_A=0
+                        else:
+                            wf_swap[:,moved_elec,i_r]= wf_gen[ptcls_x,:]
+
+                        delta = np.zeros(N)
+                        delta[coords_r[moved_elec,i_r]] = -1
+                        delta[ptcls_x]=1
+
+                        n_occ_r[:,i_r] = n_occ_r[:,i_r] + delta
+                        n_pos_r[:,i_r] = n_pos_r[:,i_r] + (moved_elec + 1)*delta
+                        coords_r[moved_elec,i_r] = ptcls_x
+
+                x=np.argwhere(n_pos_r[:,i_r]>0)
+                assert len(x)== N_pt, 'no of ptcle is %d' % (len(x))
+                assert np.sum(n_occ_r[inds_A,i_r])== N_pt_A, 'n_occ_A anc ptcle is %d' % (np.sum(n_occ_r[inds_A,i_r]))
+                assert np.sum(n_occ_r[:,i_r])== N_pt, 'n_occ anc ptcle is %d' % (np.sum(n_occ_r[:,i_r]))
+
+
+# ##############################################################     
+            
+        if state> (min_state-1):
+            
+            ratio_r=1.0+0j
+            for i_r in range(r):
+                ratio_r *= np.linalg.det(wf_swap[:,:,i_r])/np.linalg.det(wf_r[:,:,i_r]) #product of r transposed ratios
+            ent_ratio[count] = np.abs(ratio_r)
+            count+=1
+
+        
+        if (state%500) ==0:
+            for i_r in range(r):
+                wf_inv_r[:,:,i_r]=np.linalg.inv(wf_r[:,:,i_r])
+
+
+    acc_ratio=move_accepted/move_attempted
+    
+    
+    #print("Amplitude acceptance rate=", acc_ratio)
+    return np.mean(ent_ratio)
+    
+ ############################## PHASE CALCULATION #####################################
+ 
+ def VMC_phase_ratio(numconfig,check_step,N,N_pt,wf_gen,wf_r,n_occ_r,n_pos_r,coords_r,inds_A,N_pt_A):
+
+    move_attempted = 0
+    move_accepted = 0
+    
+    r = wf_r.shape[2]
+    
+    wf_inv_r = np.zeros(wf_r.shape,dtype=np.complex128)
+    wf_inds= np.zeros((N_pt_A,r),dtype=int)
+    for i_r in range(r):
+        wf_inv_r[:,:,i_r]=np.linalg.inv(wf_r[:,:,i_r])
+        pt_num_inside = np.argwhere( n_occ_r[inds_A,i_r]>0 )
+        pt_num_inside = np.reshape( pt_num_inside, (N_pt_A,)).tolist()
+        wf_inds[:,i_r]=( n_pos_r[ inds_A[pt_num_inside], i_r] )-1    #Used to be sorted
+    
+    wf_swap = np.zeros(wf_r.shape,dtype=np.complex128)
+    wf_swap_inv = np.zeros(wf_r.shape,dtype=np.complex128)
+    up_one = (np.arange(r)+1)%r
+    down_one = (np.arange(r)-1)%r
+    for i_r in range(r):
+    # r permutation of subsystem indices
+        wf_swap[:,:,i_r] = np.copy(wf_r[:,:,i_r])
+        wf_swap[:,wf_inds[:,i_r],i_r] = np.copy(wf_r[:,wf_inds[:,up_one[i_r]],up_one[i_r]]) #Shifting configurations with the next wf in sequence
+        wf_swap_inv[:,:,i_r] = np.linalg.inv(wf_swap[:,:,i_r])
+
+    step_abs=np.arange(1,Ns+1) #Ns?
+    step_vals=np.sort(np.concatenate((-step_abs,step_abs),axis=0)).tolist()
+
+    
+    min_state=5
+    
+    phi_0 = 1
+    for i_r in range(r):
+        phi_0*=np.conj(np.linalg.det(wf_r[:,:,i_r]))*np.linalg.det(wf_swap[:,:,i_r])
+    phi_0= np.angle(phi_0)
+        
+    phi=phi_0
+#     phi=np.exp(1j*phi_0)
+
+    ent_ratio=np.zeros(numconfig,dtype=np.complex64) 
+    
+    for state in range(numconfig+min_state):
+        for step in range(0,check_step):               #Samples observables after check_step iterations
+        
+            for i_r in range(r):
+                for moved_elec in range(N_pt):
+                    move_attempted=move_attempted+1
+                    
+                    stepx=random.sample(step_vals,1)[0]
+                    ptcls_x= np.mod( coords_r[moved_elec,i_r]+stepx, N) # new configuration
+
+                    if n_occ_r[ptcls_x,i_r]==1:
+                        continue
+
+                    inside_A=0    
+                    val_orig = np.min( np.abs(inds_A- coords_r[moved_elec,i_r]) )
+                    val_dest = np.min( np.abs(inds_A-ptcls_x) )
+                    if val_orig==0 and val_dest==0 :
+                        inside_A=1
+                        val_1 = np.min(np.abs(wf_inds[:,i_r]-moved_elec))
+                        ind_1 = np.argmin(np.abs(wf_inds[:,i_r]-moved_elec))
+                        assert val_1==0 , 'wrong inds_A for wf'
+                        rel = np.dot(wf_swap_inv[wf_inds[ind_1,up_one[i_r]],:,up_one[i_r]],np.transpose(wf_gen[ptcls_x,:])) #down_one[i_r]?
+                        #relative = np.conj(np.linalg.det(wf_new_r[:,:,i_r]))*np.linalg.det(wf_new_swap[:,:,i_r])/(np.conj(np.linalg.det(wf_r[:,:,i_r]))*np.linalg.det(wf_swap[:,:,i_r])) 
+                    elif val_orig!=0 and val_dest!=0 :
+                        rel = np.dot(wf_swap_inv[moved_elec,:,i_r],np.transpose(wf_gen[ptcls_x,:])) #down_one[i_r]?
+                        #relative = np.conj(np.linalg.det(wf_new_r[:,:,i_r]))*np.linalg.det(wf_new_swap[:,:,i_r])/(np.conj(np.linalg.det(wf_r[:,:,i_r]))*np.linalg.det(wf_swap[:,:,i_r])) 
+                        inside_A=0
+                    else:
+                        continue
+                        
+                    u_0 = np.transpose(wf_gen[ptcls_x,:] - wf_gen[coords_r[moved_elec,i_r],:])
+                    pt_wf_1=np.transpose(wf_gen[ptcls_x,:])
+
+                    rel =  rel*np.conj(np.dot(wf_inv_r[moved_elec,:,i_r],pt_wf_1))
+
+                    alpha=min(1, np.abs(rel))
+
+                    random_num=random.random()
+
+                    if random_num <= alpha:
+                        move_accepted += 1
+
+                        #Sherman-Morisson Formula for updating inverse matrix
+                        v=np.zeros((N_pt,1))
+                        v[moved_elec]=1
+                        num = np.dot(np.dot(np.dot(wf_inv_r[:,:,i_r],u_0),v.T),wf_inv_r[:,:,i_r])
+                        denom = (1+np.dot(v.T,np.dot(wf_inv_r[:,:,i_r],u_0)))
+                        wf_inv_r[:,:,i_r] = wf_inv_r[:,:,i_r] - num/denom 
+                        wf_r[:,moved_elec,i_r] = np.reshape(np.transpose(wf_gen[ptcls_x,:]),(N_pt,))
+                        
+                        if inside_A==1:
+                            u_1=np.reshape(pt_wf_1,(N_pt,1)) - np.reshape(wf_swap[:,wf_inds[ind_1,up_one[i_r]],up_one[i_r]],(N_pt,1))
+                            v=np.zeros((N_pt,1))
+                            v[wf_inds[ind_1,up_one[i_r]]]=1
+                            wf_swap_inv[:,:,up_one[i_r]]=wf_swap_inv[:,:,up_one[i_r]] - np.dot(np.dot(np.dot(wf_swap_inv[:,:,up_one[i_r]],u_1),v.T),wf_swap_inv[:,:,up_one[i_r]]) \
+                                 /(1+np.dot(v.T,np.dot(wf_swap_inv[:,:,up_one[i_r]],u_1))) 
+                            wf_swap[:,wf_inds[ind_1,up_one[i_r]],up_one[i_r]]= np.reshape(pt_wf_1,(N_pt,))
+                            inside_A=0
+                        else:
+                            u_1=np.reshape(pt_wf_1,(N_pt,1)) - np.reshape(wf_swap[:,moved_elec,i_r],(N_pt,1))
+                            wf_swap_inv[:,:,i_r]=wf_swap_inv[:,:,i_r] - np.dot(np.dot(np.dot(wf_swap_inv[:,:,i_r],u_1),v.T),wf_swap_inv[:,:,i_r]) \
+                                    /(1+np.dot(v.T,np.dot(wf_swap_inv[:,:,i_r],u_1))) 
+
+                            wf_swap[:,moved_elec,i_r]= np.reshape(pt_wf_1,(N_pt,))
+                        
+                        delta = np.zeros(N)
+                        delta[coords_r[moved_elec,i_r]] = -1
+                        delta[ptcls_x]=1
+
+                        n_occ_r[:,i_r] = n_occ_r[:,i_r] + delta
+                        n_pos_r[:,i_r] = n_pos_r[:,i_r] + (moved_elec + 1)*delta
+                        coords_r[moved_elec,i_r] = ptcls_x
+                        
+                        #phi = phi + np.angle(rel)
+
+                x=np.argwhere(n_pos_r[:,i_r]>0)
+                assert len(x)== N_pt, 'no of ptcle is %d' % (len(x))
+                assert np.sum(n_occ_r[inds_A,i_r])== N_pt_A, 'n_occ_A anc ptcle is %d' % (np.sum(n_occ_r[inds_A,i_r]))
+                assert np.sum(n_occ_r[:,i_r])== N_pt, 'n_occ anc ptcle is %d' % (np.sum(n_occ_r[:,i_r]))
+                        
+
+
+
+# ##############################################################
+        #assert n_occ_r[:,i_r].sum()==N_pt, "total particle number changes!!"
+    
+        if state> (min_state-1):
+            phi = 1
+            for i_r in range(r):
+                phi*=np.conj(np.linalg.det(wf_r[:,:,i_r]))*np.linalg.det(wf_swap[:,:,i_r])
+            phi= np.angle(phi)
+            ent_ratio[state-min_state] = phi
+
+        
+        if (state%500) ==0:
+            for i_r in range(r):
+                wf_inv_r[:,:,i_r]=np.linalg.inv(wf_r[:,:,i_r])
+                wf_swap_inv[:,:,i_r] = np.linalg.inv(wf_swap[:,:,i_r])
+        #print("Rel is:", rel)
+
+
+    acc_ratio=move_accepted/move_attempted
+
+        
+    #print("Angle acceptance rate=", acc_ratio)
+    return np.mean(np.exp(1j*ent_ratio)),ent_ratio
+#     return np.mean(ent_ratio)
+
+
+###################################### INITIALIZATION ##################################
+
+N = 10                          #number of sites
+N_pt = np.int(N/2)              #number of particles
+n_hop = 4                       #maximum length of random walk
+numconfig = 5000                #number of evaluated configurations
+check_step =10                  #number of cycles before each evaluation
+Ns=4                            #number of steps possible per move
+
+t = 1
+dt = 0
+t1 = t + dt
+t2 = t - dt
+BC=-1  #np.exp(1j*np.pi/3)
+r=3                             #Degree of Renyi entropy
+
+SSH_Orbitals = wf_SSH_gen(N,N_pt,BC,t1,t2)
+
+wf_r= np.zeros((N_pt,N_pt,r),dtype=np.complex64)
+n_occ_r= np.zeros((N,r),dtype=int)
+coords_r= np.zeros((N_pt,r),dtype=int)
+n_pos_r = np.zeros((N,r),dtype=int)
+    
+cond_r= np.zeros(r)
+for i_r in range(r):
+    n_occ_r[:,i_r], n_pos_r[:,i_r], coords_r[:,i_r]=initialize_wf(N, N_pt)
+    wf_r[:,:,i_r]=np.transpose(SSH_Orbitals[coords_r[:,i_r],:])
+    cond_r[i_r]=np.linalg.cond(wf_r[:,:,i_r])
+
+Lsub_list= np.arange(1,int(N/2),1)                      #subsystem sizes to be checked
+Rr_ex=np.zeros(len(Lsub_list))                          #Exact Renyi values for above subsystem sizes
+Rr_vmc=np.zeros(len(Lsub_list), dtype=np.complex64)     #VMC Renyi values for above subsystem sizes
+Gmat=np.dot(SSH_Orbitals,np.matrix(SSH_Orbitals).H)
+
+########################## EVALUATION   #####################################
+
+t_timer=time.time()
+random.seed(time.time())
+
+for index in Lsub_list:
+    inds_A = np.arange(index)    
+    Frac = VMC_equal_number(numconfig,check_step,N,N_pt,Orbitals,wf_r,n_occ_r,coords_r,inds_A)
+    #print("The fraction for the region",inds_A, "is: ",Frac)
+
+    ################### Amplitude/Phase calculation ##########################
+
+    amp_inds = np.zeros(np.max(inds_A)+2)
+    phase_inds = np.zeros(np.max(inds_A)+2,dtype=np.complex64)
+    for ind in range(np.max(inds_A)+2):
+        N_pt_A = ind
+        
+        if ind < int(len(inds_A)/2-2) or ind > int(len(inds_A)/2+2):  #Only evaluate elements within +/- 2 of half filling of subregion
+                    continue
+                
+        check = 0
+        miss = 0
+        threshold = 100000
+        while check < 1:
+            for i_r in range(r):
+                n_occ_r[:,i_r], n_pos_r[:,i_r], coords_r[:,i_r]=initialize_wf(N, N_pt)
+                wf_r[:,:,i_r]=np.transpose(SSH_Orbitals[coords_r[:,i_r],:])
+                cond_r[i_r]=np.linalg.cond(wf_r[:,:,i_r])
+            if np.max(np.sum(n_occ_r[inds_A,:],axis=0)) == np.min(np.sum(n_occ_r[inds_A,:],axis=0))==N_pt_A:
+                check+=1
+            elif miss>threshold: 
+                print('The particle no. %d is vanishingly likely for %d subsystem size' %(N_pt_A) %(index))
+                check+=1
+            else:
+                miss+=1
+
+        if miss>threshold:
+            amp_inds[ind] = 0
+            phase_inds[ind],ent_ratio = 0,0
+        else:
+            amp_inds[ind] = VMC_amplitude_ratio(numconfig,check_step,N,N_pt,Orbitals,wf_r,n_occ_r,n_pos_r,coords_r,inds_A,N_pt_A)
+            phase_inds[ind],ent_ratio = VMC_phase_ratio(numconfig,check_step,N,N_pt,Orbitals,wf_r,n_occ_r,n_pos_r,coords_r,inds_A,N_pt_A)
+            #print("The amplitude for the region",inds_A, "with ", N_pt_A, " particles is: ", amp_inds[ind])
+            #print("The phase for the region",inds_A, "with ", N_pt_A, " particles is: ", phase_inds[ind])
+            #print("The fraction for the region",inds_A, "with ", N_pt_A, " particles is: ", Frac[ind])
+        
+
+    ################### Checking Complete calculation ##########################
+    Ren = np.sum(Frac*amp_inds*phase_inds) #There should be a break up for each n of paricles in Frac
+    
+    Rr_ex[index-1]=exact_renyi_calc(r,Gmat[np.ix_(inds_A,inds_A)])
+    Rr_vmc[index-1] = -np.abs(np.log(Ren))/(1-r)
+
+    print("subsystem size = ", index)
+    print("Approximate %d Renyi entropy: "%(r), Rr_vmc[index-1], " vs exact value", Rr_ex[index-1] )
+elapsed = time.time() - t_timer
+print("Program finished, elapsed time =", elapsed, "sec")
